@@ -22,7 +22,10 @@ use tokio::net::TcpStream;
 
 use crate::error::{Error, Result};
 use crate::event::{EventSink, RequestEvent, Timings};
-use crate::model::{HttpVersion, RequestSpec, ResponseHandle, SendOptions, TlsInfo};
+use crate::model::{
+    ByteCounts, HttpVersion, RequestSpec, ResponseHandle, SendOptions, TlsInfo,
+};
+use crate::transport::{Meter, Metered};
 
 /// Send one fully resolved request. `events` receives progress as it happens;
 /// the returned handle is metadata plus a path to the body on disk.
@@ -109,6 +112,10 @@ async fn exchange(
         Error::Transport(format!("connect to {addr}: {e}"))
     })?;
     tcp.set_nodelay(true).ok();
+    // From here down every byte is counted. `wire` sees what actually crosses
+    // the network; `app`, set below, sees plaintext.
+    let wire = Meter::new(start);
+    let tcp = Metered::new(tcp, wire.clone());
     timings.connect = Some(start.elapsed());
     emit(
         events,
@@ -122,6 +129,7 @@ async fn exchange(
     // ALPN decides unless the request pinned a version, which is what makes
     // "reproduce this bug on HTTP/1.1" a flag rather than a rebuild.
     let mut tls_info = None;
+    let app;
     let sender = if secure {
         let tls = tls_connector(opts.force_version)
             .connect(
@@ -159,35 +167,40 @@ async fn exchange(
             Some(v) => v == HttpVersion::Http2,
             None => alpn.as_deref() == Some("h2"),
         };
-        handshake(TokioIo::new(tls), h2).await?
+        // A second meter above the TLS layer: plaintext in, plaintext out.
+        app = Meter::new(start);
+        handshake(TokioIo::new(Metered::new(tls, app.clone())), h2).await?
     } else {
         // Plaintext h2 only on request: prior-knowledge h2c, no upgrade dance.
         let h2 = opts.force_version == Some(HttpVersion::Http2);
+        app = wire.clone();
         handshake(TokioIo::new(tcp), h2).await?
     };
 
     // --- Request ----------------------------------------------------------
     let is_h2 = matches!(sender, Sender::H2(_));
     let request = build_request(spec, &uri, is_h2)?;
-    let approx_bytes = approx_head_len(&request) + spec.body.as_ref().map_or(0, |b| b.len());
-
-    // Stamped before the await on purpose: `send_request` resolves when the
-    // response *head* arrives, so timing it there would bill the server's
-    // think time to our upload. Exact flush timing needs an instrumented IO
-    // wrapper around the socket -- see README, "instrumented transport".
-    timings.sent = Some(start.elapsed());
-    emit(
-        events,
-        RequestEvent::RequestSent {
-            bytes: approx_bytes,
-            at: start.elapsed(),
-        },
-    );
 
     let response = match sender {
         Sender::H1(mut tx) => tx.send_request(request).await?,
         Sender::H2(mut tx) => tx.send_request(request).await?,
     };
+
+    // Measured rather than estimated. `send_request` resolves when the
+    // response *head* arrives, so stamping the clock here would bill the
+    // server's think time to our upload; the meter instead reports the last
+    // write that happened before the head came back, which is when the
+    // request finished going out. True for HTTP/2 as well, where the preface
+    // and settings are written before the request.
+    let sent_at = app.last_write().unwrap_or_else(|| start.elapsed());
+    timings.sent = Some(sent_at);
+    emit(
+        events,
+        RequestEvent::RequestSent {
+            bytes: app.bytes_written() as usize,
+            at: sent_at,
+        },
+    );
 
     let status = response.status();
     timings.ttfb = Some(start.elapsed());
@@ -230,6 +243,13 @@ async fn exchange(
         body_path,
         body_len,
         timings,
+        bytes: ByteCounts {
+            wire_sent: wire.bytes_written(),
+            wire_received: wire.bytes_read(),
+            app_sent: app.bytes_written(),
+            app_received: app.bytes_read(),
+            encrypted: secure,
+        },
         remote_addr: Some(remote_addr),
         tls: tls_info,
     })
@@ -358,18 +378,6 @@ fn response_filename(spec: &RequestSpec) -> String {
         .collect();
     let slug: String = slug.trim_matches('-').chars().take(40).collect();
     format!("{stamp}-{slug}.bin")
-}
-
-fn approx_head_len(request: &Request<Full<Bytes>>) -> usize {
-    let line = request.method().as_str().len()
-        + request.uri().path_and_query().map_or(1, |p| p.as_str().len())
-        + "  HTTP/1.1\r\n".len();
-    let headers: usize = request
-        .headers()
-        .iter()
-        .map(|(k, v)| k.as_str().len() + v.as_bytes().len() + 4)
-        .sum();
-    line + headers + 2
 }
 
 fn describe_tls_version(v: rustls::ProtocolVersion) -> &'static str {

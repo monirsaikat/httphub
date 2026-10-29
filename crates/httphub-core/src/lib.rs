@@ -13,8 +13,9 @@ pub mod error;
 pub mod event;
 pub mod format;
 pub mod model;
+pub mod transport;
 pub mod vars;
 
 pub use error::{Error, Result};
 pub use event::{EventSink, RequestEvent, Timings};
-pub use model::{RequestSpec, ResponseHandle};
+pub use model::{ByteCounts, RequestSpec, ResponseHandle};

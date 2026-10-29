@@ -19,7 +19,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 use httphub_core::engine;
 use httphub_core::event::{RequestEvent, Timings};
-use httphub_core::model::{HttpVersion, RequestSpec, ResponseHandle, SendOptions};
+use httphub_core::model::{ByteCounts, HttpVersion, RequestSpec, ResponseHandle, SendOptions};
 use httphub_core::vars::Scope;
 use httphub_core::{format, Error};
 
@@ -333,6 +333,7 @@ fn print_response(response: &ResponseHandle) -> Result<(), Error> {
     }
 
     eprintln!("  {}", waterfall(&response.timings));
+    eprintln!("  {}", byte_line(&response.bytes));
     eprintln!();
     for (k, v) in &response.headers {
         eprintln!("  {k}: {v}");
@@ -357,6 +358,25 @@ fn waterfall(t: &Timings) -> String {
         .map(|(label, d)| format!("{label} {}", format_duration(*d)))
         .collect::<Vec<_>>()
         .join("  ")
+}
+
+/// Plaintext first, since that is what the user wrote and read. The wire
+/// figures only appear when TLS makes them differ.
+fn byte_line(b: &ByteCounts) -> String {
+    let base = format!(
+        "sent {}  received {}",
+        format_bytes(b.app_sent),
+        format_bytes(b.app_received)
+    );
+    if b.encrypted {
+        format!(
+            "{base}  (wire {} up / {} down)",
+            format_bytes(b.wire_sent),
+            format_bytes(b.wire_received)
+        )
+    } else {
+        base
+    }
 }
 
 /// Bodies live on disk; printing is a read, never a buffer we grew ourselves.
@@ -438,6 +458,13 @@ fn response_to_json(spec: &RequestSpec, response: &ResponseHandle) -> String {
             "protocol": t.protocol,
             "alpn": t.alpn,
         })),
+        "bytes": {
+            "app_sent": response.bytes.app_sent,
+            "app_received": response.bytes.app_received,
+            "wire_sent": response.bytes.wire_sent,
+            "wire_received": response.bytes.wire_received,
+            "encrypted": response.bytes.encrypted,
+        },
         "body_path": response.body_path,
         "body_len": response.body_len,
         "timings_ms": {

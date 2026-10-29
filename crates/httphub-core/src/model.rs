@@ -74,8 +74,21 @@ pub struct ResponseHandle {
     pub body_path: PathBuf,
     pub body_len: u64,
     pub timings: Timings,
+    pub bytes: ByteCounts,
     pub remote_addr: Option<std::net::SocketAddr>,
     pub tls: Option<TlsInfo>,
+}
+
+/// What crossed the socket, as measured rather than guessed. `wire_*` is what
+/// the network carried; `app_*` is plaintext. Their difference is the cost of
+/// TLS and framing, which no other client bothers to show.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ByteCounts {
+    pub wire_sent: u64,
+    pub wire_received: u64,
+    pub app_sent: u64,
+    pub app_received: u64,
+    pub encrypted: bool,
 }
 
 #[derive(Debug, Clone)]

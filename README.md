@@ -39,6 +39,18 @@ stream as a text waterfall; the GUI will forward the identical stream to the
 webview and draw one. Adding a face never means adding a second way to observe
 a request.
 
+**Timings and byte counts are measured, not estimated.** An instrumented
+socket wrapper (`transport.rs`) sits between hyper and the network, so the
+`send` phase is the real flush of the request rather than a stamp taken before
+an await, and output separates plaintext bytes from wire bytes:
+
+```
+-> 404 Not Found  HTTP/2.0  in 66ms
+  TLSv1.3 h2
+  dns 40ms  tcp 2.8ms  tls 12ms  send 2.0ms  wait 9.2ms  download 777us
+  sent 118 B  received 775 B  (wire 542 B up / 5.6 KB down)
+```
+
 **Response bodies never cross the API boundary.** They stream to
 `.httphub/responses/` and come back as a path plus metadata, so a 2 GB response
 costs a file handle instead of a heap allocation. The GUI reads byte ranges off
@@ -93,8 +105,9 @@ Working: `.http` parsing (superset of the VS Code REST Client / JetBrains
 format, so the same files open in editors people already use), variable
 resolution with `--var` and `httphub.toml` environments, the send engine over
 HTTP/1.1 and HTTP/2 with TLS 1.2/1.3, ALPN negotiation and per-request protocol
-pinning, per-phase timings, bodies streamed to disk, `send` and `parse`
-subcommands, structured and human output. 11 unit tests.
+pinning, measured per-phase timings and byte counts via an instrumented
+socket, bodies streamed to disk, `send` and `parse` subcommands, structured and
+human output. 13 unit tests.
 
 ### Decisions already made, deliberately
 
@@ -110,22 +123,19 @@ subcommands, structured and human output. 11 unit tests.
 
 Roughly in the order that keeps the tool honest:
 
-1. **Instrumented transport.** Wrap the socket to timestamp first and last
-   write, so the `send` phase is measured rather than stamped before the await
-   (see the comment in `engine.rs`). Also gives exact wire-byte capture.
-2. **`--insecure`, custom CA bundles, client certs/mTLS, SNI override.** All
+1. **`--insecure`, custom CA bundles, client certs/mTLS, SNI override.** All
    need a per-request rustls config path rather than today's cached statics.
-3. **Redirect following** with a per-hop event trail, off by default.
-4. **`httphub run <dir>`** -- collection runs, assertions, JUnit output. This
+2. **Redirect following** with a per-hop event trail, off by default.
+3. **`httphub run <dir>`** -- collection runs, assertions, JUnit output. This
    is the CI story and it should never need a second binary.
-5. **Importers**: curl, Postman, Insomnia, OpenAPI, HAR. The migration path is
+4. **Importers**: curl, Postman, Insomnia, OpenAPI, HAR. The migration path is
    the onboarding path, so import must be lossless enough to actually leave.
-6. **Secrets resolver**: `{{secret:name}}` against the OS keychain, `.env`, and
+5. **Secrets resolver**: `{{secret:name}}` against the OS keychain, `.env`, and
    shell-outs to `op` / `vault` / `aws`. Never written into a workspace file.
-7. **Scripting**: embedded JS with a typed SDK, plus a JSON-over-stdio
+6. **Scripting**: embedded JS with a typed SDK, plus a JSON-over-stdio
    subprocess hook so a pre-request step can be any executable in any language.
-8. **Tauri GUI** over the same core, consuming the same event stream.
-9. **Capture proxy** -- `httphub proxy --capture` turning real traffic into
+7. **Tauri GUI** over the same core, consuming the same event stream.
+8. **Capture proxy** -- `httphub proxy --capture` turning real traffic into
    requests. The highest-value feature on this list and the one nobody does
    well.
 
