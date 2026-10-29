@@ -68,6 +68,12 @@ cargo build
 ./target/debug/httphub send  examples/demo/users/list.http -r create_user -e local
 ./target/debug/httphub send  examples/demo/public/get.http -e public --http 1.1
 ./target/debug/httphub send  examples/demo/users/list.http -e local --json | jq .timings_ms
+
+# TLS: staging boxes, internal CAs, mutual auth, reaching a gateway by address
+./target/debug/httphub send req.http --insecure
+./target/debug/httphub send req.http --ca internal-root.pem
+./target/debug/httphub send req.http --cert client.pem --key client.key
+./target/debug/httphub send req.http --sni internal.example
 ```
 
 `examples/demo/users/list.http`:
@@ -106,8 +112,9 @@ format, so the same files open in editors people already use), variable
 resolution with `--var` and `httphub.toml` environments, the send engine over
 HTTP/1.1 and HTTP/2 with TLS 1.2/1.3, ALPN negotiation and per-request protocol
 pinning, measured per-phase timings and byte counts via an instrumented
-socket, bodies streamed to disk, `send` and `parse` subcommands, structured and
-human output. 13 unit tests.
+socket, full TLS control (`--insecure`, extra CAs, client certificates for
+mutual TLS, SNI override), bodies streamed to disk, `send` and `parse`
+subcommands, structured and human output. 18 unit tests.
 
 ### Decisions already made, deliberately
 
@@ -118,24 +125,27 @@ human output. 13 unit tests.
 - **Unknown `{{variables}}` are an error, not an empty string.** Silently
   sending `/users/` when you meant `/users/42` costs an afternoon.
 - **Origin-form request targets on HTTP/1.1**, full uri on HTTP/2.
+- **`--insecure` waives certificate trust, not signature checking.** A broken
+  handshake should still look broken; it is trust people want to skip against
+  a staging box.
+- **A missing CA or key file exits 3, not 2.** Nothing was sent, so it is a
+  configuration error, not a transport one.
 
 ## Next
 
 Roughly in the order that keeps the tool honest:
 
-1. **`--insecure`, custom CA bundles, client certs/mTLS, SNI override.** All
-   need a per-request rustls config path rather than today's cached statics.
-2. **Redirect following** with a per-hop event trail, off by default.
-3. **`httphub run <dir>`** -- collection runs, assertions, JUnit output. This
+1. **Redirect following** with a per-hop event trail, off by default.
+2. **`httphub run <dir>`** -- collection runs, assertions, JUnit output. This
    is the CI story and it should never need a second binary.
-4. **Importers**: curl, Postman, Insomnia, OpenAPI, HAR. The migration path is
+3. **Importers**: curl, Postman, Insomnia, OpenAPI, HAR. The migration path is
    the onboarding path, so import must be lossless enough to actually leave.
-5. **Secrets resolver**: `{{secret:name}}` against the OS keychain, `.env`, and
+4. **Secrets resolver**: `{{secret:name}}` against the OS keychain, `.env`, and
    shell-outs to `op` / `vault` / `aws`. Never written into a workspace file.
-6. **Scripting**: embedded JS with a typed SDK, plus a JSON-over-stdio
+5. **Scripting**: embedded JS with a typed SDK, plus a JSON-over-stdio
    subprocess hook so a pre-request step can be any executable in any language.
-7. **Tauri GUI** over the same core, consuming the same event stream.
-8. **Capture proxy** -- `httphub proxy --capture` turning real traffic into
+6. **Tauri GUI** over the same core, consuming the same event stream.
+7. **Capture proxy** -- `httphub proxy --capture` turning real traffic into
    requests. The highest-value feature on this list and the one nobody does
    well.
 

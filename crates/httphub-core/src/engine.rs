@@ -25,6 +25,7 @@ use crate::event::{EventSink, RequestEvent, Timings};
 use crate::model::{
     ByteCounts, HttpVersion, RequestSpec, ResponseHandle, SendOptions, TlsInfo,
 };
+use crate::tls::TlsOptions;
 use crate::transport::{Meter, Metered};
 
 /// Send one fully resolved request. `events` receives progress as it happens;
@@ -131,10 +132,13 @@ async fn exchange(
     let mut tls_info = None;
     let app;
     let sender = if secure {
-        let tls = tls_connector(opts.force_version)
+        // SNI, and therefore verification, can be pointed somewhere other than
+        // the url's host: that is how you reach a gateway by address.
+        let server_name = opts.tls.server_name(&host).to_string();
+        let tls = tls_connector(opts.force_version, &opts.tls)?
             .connect(
-                rustls::pki_types::ServerName::try_from(host.clone())
-                    .map_err(|e| Error::Tls(format!("invalid sni name {host}: {e}")))?,
+                rustls::pki_types::ServerName::try_from(server_name.clone())
+                    .map_err(|e| Error::Tls(format!("invalid sni name {server_name}: {e}")))?,
                 tcp,
             )
             .await
@@ -395,10 +399,17 @@ fn emit(events: Option<&EventSink>, event: RequestEvent) {
     }
 }
 
-/// One cached config per ALPN offer. Pinning a version has to change what we
-/// advertise, not just how we read the reply -- otherwise the server answers
-/// in h2 and we try to parse it as HTTP/1.1.
-fn tls_connector(force: Option<HttpVersion>) -> tokio_rustls::TlsConnector {
+/// One cached config per ALPN offer, for the common case of default TLS
+/// settings. Pinning a version has to change what we advertise, not just how
+/// we read the reply -- otherwise the server answers in h2 and we try to parse
+/// it as HTTP/1.1.
+///
+/// Anything non-default (an extra CA, a client certificate, --insecure) builds
+/// a fresh config, since caching those would mean keying on file contents.
+fn tls_connector(
+    force: Option<HttpVersion>,
+    tls_opts: &TlsOptions,
+) -> Result<tokio_rustls::TlsConnector> {
     static NEGOTIATED: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     static ONLY_H1: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     static ONLY_H2: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
@@ -409,17 +420,17 @@ fn tls_connector(force: Option<HttpVersion>) -> tokio_rustls::TlsConnector {
         Some(HttpVersion::Http2) => (&ONLY_H2, vec![b"h2".to_vec()]),
     };
 
-    let config = cell.get_or_init(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
+    let config = if tls_opts.is_default() {
+        match cell.get() {
+            Some(config) => config.clone(),
+            None => {
+                let built = crate::tls::build_config(alpn, tls_opts)?;
+                cell.get_or_init(|| built).clone()
+            }
+        }
+    } else {
+        crate::tls::build_config(alpn, tls_opts)?
+    };
 
-        let mut roots = rustls::RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-        let mut config = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        config.alpn_protocols = alpn;
-        Arc::new(config)
-    });
-    tokio_rustls::TlsConnector::from(config.clone())
+    Ok(tokio_rustls::TlsConnector::from(config))
 }

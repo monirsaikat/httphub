@@ -20,6 +20,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use httphub_core::engine;
 use httphub_core::event::{RequestEvent, Timings};
 use httphub_core::model::{ByteCounts, HttpVersion, RequestSpec, ResponseHandle, SendOptions};
+use httphub_core::tls::TlsOptions;
 use httphub_core::vars::Scope;
 use httphub_core::{format, Error};
 
@@ -56,6 +57,23 @@ enum Command {
         http: Option<CliVersion>,
         #[arg(long, default_value_t = 30)]
         timeout: u64,
+        /// Accept any server certificate. Waives trust, not signature checks.
+        #[arg(long)]
+        insecure: bool,
+        /// Extra CA certificates (PEM), added to the web roots rather than
+        /// replacing them.
+        #[arg(long, value_name = "FILE")]
+        ca: Option<PathBuf>,
+        /// Client certificate chain (PEM) for mutual TLS. Needs --key.
+        #[arg(long, value_name = "FILE")]
+        cert: Option<PathBuf>,
+        /// Private key (PEM) for --cert.
+        #[arg(long, value_name = "FILE")]
+        key: Option<PathBuf>,
+        /// Send this name in SNI and verify against it, instead of the url's
+        /// host. For reaching a gateway by address.
+        #[arg(long, value_name = "HOST")]
+        sni: Option<String>,
         /// Machine-readable output on stdout, so `| jq` works.
         #[arg(long)]
         json: bool,
@@ -115,7 +133,8 @@ fn exit_code_for(err: &Error) -> u8 {
         | Error::UnresolvedVar(_)
         | Error::NoSuchRequest(_)
         | Error::NoRequests(_)
-        | Error::InvalidUrl { .. } => 3,
+        | Error::InvalidUrl { .. }
+        | Error::Config(_) => 3,
         _ => 2,
     }
 }
@@ -144,6 +163,11 @@ async fn run(cli: Cli) -> Result<ExitCode, Error> {
             vars,
             http,
             timeout,
+            insecure,
+            ca,
+            cert,
+            key,
+            sni,
             json,
             body_only,
             fail,
@@ -151,11 +175,24 @@ async fn run(cli: Cli) -> Result<ExitCode, Error> {
         } => {
             let spec = resolve_one(&file, request.as_deref(), env.as_deref(), &vars)?;
 
+            let tls = TlsOptions {
+                insecure,
+                ca_file: ca,
+                client_cert: cert,
+                client_key: key,
+                sni,
+            };
+            tls.validate()?;
+            if tls.insecure {
+                eprintln!("warning: --insecure, certificate trust is not being checked");
+            }
+
             let opts = SendOptions {
                 timeout: Duration::from_secs(timeout),
                 force_version: http.map(Into::into),
                 follow_redirects: false,
                 store_dir: store_dir(&file),
+                tls,
             };
 
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

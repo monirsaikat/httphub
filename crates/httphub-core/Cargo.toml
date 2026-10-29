@@ -15,5 +15,6 @@ bytes.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true
+rustls-pemfile.workspace = true
 thiserror.workspace = true
 serde.workspace = true

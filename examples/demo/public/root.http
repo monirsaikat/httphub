@@ -1,0 +1,3 @@
+### root
+GET {{base_url}}/
+Accept: text/html

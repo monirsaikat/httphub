@@ -33,6 +33,9 @@ pub enum Error {
     #[error("tls: {0}")]
     Tls(String),
 
+    #[error("{0}")]
+    Config(String),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

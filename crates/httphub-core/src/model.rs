@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::event::Timings;
+use crate::tls::TlsOptions;
 
 /// A single request as written in a `.http` file, before variable resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -50,6 +51,7 @@ pub struct SendOptions {
     pub follow_redirects: bool,
     /// Where response bodies are streamed. Derived, disposable state.
     pub store_dir: PathBuf,
+    pub tls: TlsOptions,
 }
 
 impl Default for SendOptions {
@@ -59,6 +61,7 @@ impl Default for SendOptions {
             force_version: None,
             follow_redirects: false,
             store_dir: PathBuf::from(".httphub/responses"),
+            tls: TlsOptions::default(),
         }
     }
 }
