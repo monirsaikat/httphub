@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use httphub_core::engine;
+use httphub_core::run::{self, RequestOutcome, RunOptions, RunReport};
 use httphub_core::event::{RequestEvent, Timings};
 use httphub_core::model::{ByteCounts, HttpVersion, RequestSpec, ResponseHandle, SendOptions};
 use httphub_core::tls::TlsOptions;
@@ -93,6 +94,33 @@ enum Command {
         #[arg(long)]
         trace: bool,
     },
+    /// Run every request under a path and check their @expect assertions.
+    Run {
+        /// File or directory to run. Defaults to the working directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(short, long)]
+        env: Option<String>,
+        #[arg(long = "var", value_name = "KEY=VALUE")]
+        vars: Vec<String>,
+        /// Output shape. `junit` writes XML for CI to collect.
+        #[arg(long, value_enum, default_value_t = Reporter::Human)]
+        reporter: Reporter,
+        /// Stop at the first failing request.
+        #[arg(long)]
+        bail: bool,
+        /// Per-request timeout, seconds.
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+        #[arg(short = 'L', long = "location")]
+        follow: bool,
+        #[arg(long)]
+        insecure: bool,
+        #[arg(long, value_name = "FILE")]
+        ca: Option<PathBuf>,
+        #[arg(long)]
+        trace: bool,
+    },
     /// Parse a .http file and show what the engine would send. No network.
     Parse {
         file: PathBuf,
@@ -103,6 +131,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum Reporter {
+    Human,
+    Json,
+    Junit,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -160,6 +195,74 @@ async fn run(cli: Cli) -> Result<ExitCode, Error> {
                 print_spec(&spec);
             }
             Ok(ExitCode::SUCCESS)
+        }
+
+        Command::Run {
+            path,
+            env,
+            vars,
+            reporter,
+            bail,
+            timeout,
+            follow,
+            insecure,
+            ca,
+            trace,
+        } => {
+            let files = run::discover(&path)?;
+            if files.is_empty() {
+                return Err(Error::Config(format!(
+                    "no .http files under {}",
+                    path.display()
+                )));
+            }
+
+            let tls = TlsOptions {
+                insecure,
+                ca_file: ca,
+                ..Default::default()
+            };
+            if tls.insecure {
+                eprintln!("warning: --insecure, certificate trust is not being checked");
+            }
+
+            let opts = RunOptions {
+                send: SendOptions {
+                    timeout: Duration::from_secs(timeout),
+                    force_version: None,
+                    follow_redirects: follow,
+                    max_redirects: 10,
+                    store_dir: store_dir(&path),
+                    tls,
+                },
+                bail,
+            };
+
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let printer = tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    if trace {
+                        eprintln!("  · {}", describe(&event));
+                    }
+                }
+            });
+
+            let scope = build_scope(&path, env.as_deref(), &vars)?;
+            let report = run::run(&files, &scope, &opts, Some(&tx)).await?;
+            drop(tx);
+            let _ = printer.await;
+
+            match reporter {
+                Reporter::Human => print_run(&report),
+                Reporter::Json => println!("{}", run_json(&report)),
+                Reporter::Junit => println!("{}", run_junit(&report)),
+            }
+
+            Ok(if report.passed() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
         }
 
         Command::Send {
@@ -264,9 +367,14 @@ fn resolve_one(
             .ok_or_else(|| Error::NoRequests(file.to_path_buf()))?,
     };
 
+    build_scope(file, env, overrides)?.resolve(&spec)
+}
+
+/// Environment file first, then `--var`, which wins.
+fn build_scope(from: &Path, env: Option<&str>, overrides: &[String]) -> Result<Scope, Error> {
     let mut scope = Scope::new();
     if let Some(env) = env {
-        scope.extend(load_env(file, env)?);
+        scope.extend(load_env(from, env)?);
     }
     for pair in overrides {
         let (k, v) = pair.split_once('=').ok_or_else(|| Error::Parse {
@@ -276,8 +384,7 @@ fn resolve_one(
         })?;
         scope.set(k, v);
     }
-
-    scope.resolve(&spec)
+    Ok(scope)
 }
 
 /// Walk up from the request file looking for `httphub.toml`, the way git finds
@@ -621,4 +728,213 @@ fn format_bytes(n: u64) -> String {
     } else {
         format!("{:.2} GB", n_f / (KB * KB * KB))
     }
+}
+
+// --- run reporters -------------------------------------------------------
+
+/// Human output goes to stderr, so `--reporter json` is the only thing on
+/// stdout and a pipe stays clean either way.
+fn print_run(report: &RunReport) {
+    let mut current: Option<&Path> = None;
+
+    for outcome in &report.outcomes {
+        if current != Some(outcome.file.as_path()) {
+            if current.is_some() {
+                eprintln!();
+            }
+            eprintln!("{}", display_path(&outcome.file));
+            current = Some(outcome.file.as_path());
+        }
+
+        let status = match outcome.status {
+            Some(s) => s.to_string(),
+            None => "---".to_string(),
+        };
+        eprintln!(
+            "  {}  {:<26} {:>3}  {:>8}  {}",
+            if outcome.passed() { "ok  " } else { "FAIL" },
+            clip(&outcome.label, 26),
+            status,
+            format_duration(outcome.elapsed),
+            check_summary(outcome),
+        );
+
+        if let Some(error) = &outcome.error {
+            eprintln!("          {error}");
+        }
+        for check in outcome.checks.iter().filter(|c| !c.passed()) {
+            eprintln!(
+                "          {} -- {}",
+                check.expectation,
+                check.failure.as_deref().unwrap_or("failed")
+            );
+        }
+        if !outcome.captured.is_empty() {
+            let shown: Vec<String> = outcome
+                .captured
+                .iter()
+                .map(|(k, v)| format!("{k}={}", clip(v, 32)))
+                .collect();
+            eprintln!("          captured {}", shown.join(", "));
+        }
+    }
+
+    eprintln!();
+    eprintln!(
+        "{} requests, {} passed, {} failed  |  {} checks, {} failed  in {}",
+        report.outcomes.len(),
+        report.outcomes.len() - report.failed_requests(),
+        report.failed_requests(),
+        report.total_checks(),
+        report.failed_checks(),
+        format_duration(report.elapsed),
+    );
+    if report.stopped_early {
+        eprintln!("stopped early: --bail");
+    }
+}
+
+fn check_summary(outcome: &RequestOutcome) -> String {
+    let failed = outcome.checks.iter().filter(|c| !c.passed()).count();
+    match (outcome.checks.len(), failed) {
+        (0, _) => String::new(),
+        (1, 0) => "1 check".to_string(),
+        (n, 0) => format!("{n} checks"),
+        (n, f) => format!("{f}/{n} checks failed"),
+    }
+}
+
+/// Reports read better, and diff better between machines, with one separator.
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+fn clip(text: &str, width: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    if flat.chars().count() <= width {
+        flat
+    } else {
+        format!("{}...", flat.chars().take(width.saturating_sub(3)).collect::<String>())
+    }
+}
+
+fn run_json(report: &RunReport) -> String {
+    let outcomes: Vec<serde_json::Value> = report
+        .outcomes
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "file": display_path(&o.file),
+                "label": o.label,
+                "method": o.method,
+                "url": o.url,
+                "status": o.status,
+                "elapsed_ms": o.elapsed.as_secs_f64() * 1000.0,
+                "passed": o.passed(),
+                "error": o.error,
+                "checks": o.checks.iter().map(|c| serde_json::json!({
+                    "expectation": c.expectation,
+                    "passed": c.passed(),
+                    "failure": c.failure,
+                })).collect::<Vec<_>>(),
+                "captured": o.captured.iter().map(|(k, v)| {
+                    (k.clone(), serde_json::Value::String(v.clone()))
+                }).collect::<serde_json::Map<String, serde_json::Value>>(),
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "passed": report.passed(),
+        "requests": report.outcomes.len(),
+        "failed_requests": report.failed_requests(),
+        "checks": report.total_checks(),
+        "failed_checks": report.failed_checks(),
+        "elapsed_ms": report.elapsed.as_secs_f64() * 1000.0,
+        "stopped_early": report.stopped_early,
+        "outcomes": outcomes,
+    })
+    .to_string()
+}
+
+/// JUnit XML, because that is what every CI system already knows how to read.
+fn run_junit(report: &RunReport) -> String {
+    let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    out.push_str(&format!(
+        "<testsuites tests=\"{}\" failures=\"{}\" time=\"{:.3}\">\n",
+        report.outcomes.len(),
+        report.failed_requests(),
+        report.elapsed.as_secs_f64()
+    ));
+
+    for (file, outcomes) in group_by_file(report) {
+        let failures = outcomes.iter().filter(|o| !o.passed()).count();
+        let time: f64 = outcomes.iter().map(|o| o.elapsed.as_secs_f64()).sum();
+        out.push_str(&format!(
+            "  <testsuite name=\"{}\" tests=\"{}\" failures=\"{failures}\" time=\"{time:.3}\">\n",
+            xml(&display_path(&file)),
+            outcomes.len(),
+        ));
+
+        for outcome in outcomes {
+            out.push_str(&format!(
+                "    <testcase name=\"{}\" classname=\"{}\" time=\"{:.3}\"",
+                xml(&outcome.label),
+                xml(&display_path(&file)),
+                outcome.elapsed.as_secs_f64()
+            ));
+
+            let mut problems: Vec<String> = Vec::new();
+            if let Some(error) = &outcome.error {
+                problems.push(format!("could not send: {error}"));
+            }
+            for check in outcome.checks.iter().filter(|c| !c.passed()) {
+                problems.push(format!(
+                    "{} -- {}",
+                    check.expectation,
+                    check.failure.as_deref().unwrap_or("failed")
+                ));
+            }
+
+            if problems.is_empty() {
+                out.push_str("/>\n");
+            } else {
+                out.push_str(">\n");
+                out.push_str(&format!(
+                    "      <failure message=\"{}\">{}</failure>\n",
+                    xml(&problems[0]),
+                    xml(&problems.join("\n"))
+                ));
+                out.push_str("    </testcase>\n");
+            }
+        }
+        out.push_str("  </testsuite>\n");
+    }
+
+    out.push_str("</testsuites>");
+    out
+}
+
+/// Outcomes keep file order, so grouping is a fold rather than a sort.
+fn group_by_file(report: &RunReport) -> Vec<(PathBuf, Vec<&RequestOutcome>)> {
+    let mut grouped: Vec<(PathBuf, Vec<&RequestOutcome>)> = Vec::new();
+    for outcome in &report.outcomes {
+        match grouped.last_mut() {
+            Some((file, bucket)) if *file == outcome.file => bucket.push(outcome),
+            _ => grouped.push((outcome.file.clone(), vec![outcome])),
+        }
+    }
+    grouped
+}
+
+fn xml(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }

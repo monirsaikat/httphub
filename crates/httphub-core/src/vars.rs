@@ -77,6 +77,8 @@ impl Scope {
                 .map(|(k, v)| Ok((k.clone(), self.substitute(v)?)))
                 .collect::<Result<Vec<_>>>()?,
             body: spec.body.as_deref().map(|b| self.substitute(b)).transpose()?,
+            expectations: spec.expectations.clone(),
+            captures: spec.captures.clone(),
             line: spec.line,
         })
     }

@@ -11,9 +11,11 @@
 pub mod engine;
 pub mod error;
 pub mod event;
+pub mod expect;
 pub mod format;
 pub mod model;
 pub mod redirect;
+pub mod run;
 pub mod tls;
 pub mod transport;
 pub mod vars;

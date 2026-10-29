@@ -73,8 +73,11 @@ fn parse_block(
 
     let mut iter = lines.iter().peekable();
 
-    // Leading comments and blanks. `# @name x` is metadata, not a comment.
-    while let Some((_, line)) = iter.peek() {
+    // Leading comments and blanks. `# @name`, `# @expect` and `# @capture` are
+    // metadata rather than commentary: assertions belong in the same file as
+    // the request, where they can be reviewed and diffed.
+    while let Some((line_no, line)) = iter.peek() {
+        let line_no = *line_no;
         let t = line.trim();
         if t.is_empty() {
             iter.next();
@@ -83,6 +86,24 @@ fn parse_block(
         if let Some(rest) = t.strip_prefix('#').map(str::trim) {
             if let Some(name) = rest.strip_prefix("@name") {
                 spec.name = Some(name.trim().trim_matches('"').to_string());
+            } else if let Some(body) = rest.strip_prefix("@expect") {
+                let parsed = crate::expect::parse_expectation(body.trim()).map_err(|message| {
+                    Error::Parse {
+                        file: file_label.to_string(),
+                        line: line_no,
+                        message,
+                    }
+                })?;
+                spec.expectations.push(parsed);
+            } else if let Some(body) = rest.strip_prefix("@capture") {
+                let parsed = crate::expect::parse_capture(body.trim()).map_err(|message| {
+                    Error::Parse {
+                        file: file_label.to_string(),
+                        line: line_no,
+                        message,
+                    }
+                })?;
+                spec.captures.push(parsed);
             }
             iter.next();
             continue;
@@ -241,6 +262,48 @@ mod tests {
             Err(Error::Parse { line, .. }) => assert_eq!(line, 2),
             other => panic!("expected a parse error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn collects_expectations_and_captures_in_order() {
+        let src = "### Create
+                   # @name create
+                   # @expect status 201
+                   # @expect json /id != 0
+                   # @capture id = json /id
+                   # a plain comment
+                   POST http://a.test/users
+";
+        let reqs = parse(src, "t.http").unwrap();
+        assert_eq!(reqs[0].expectations.len(), 2);
+        assert_eq!(reqs[0].expectations[0].describe(), "status 201");
+        assert_eq!(reqs[0].expectations[1].describe(), "json /id != 0");
+        assert_eq!(reqs[0].captures.len(), 1);
+        assert_eq!(reqs[0].captures[0].describe(), "id = json /id");
+    }
+
+    #[test]
+    fn a_bad_expectation_reports_its_own_line() {
+        let src = "### x
+# @name x
+# @expect vibes good
+GET http://a.test/
+";
+        match parse(src, "t.http") {
+            Err(Error::Parse { line, message, .. }) => {
+                assert_eq!(line, 3);
+                assert!(message.contains("unknown expectation"), "{message}");
+            }
+            other => panic!("expected a parse error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn requests_without_directives_have_none() {
+        let reqs = parse("GET http://a.test/
+", "t.http").unwrap();
+        assert!(reqs[0].expectations.is_empty());
+        assert!(reqs[0].captures.is_empty());
     }
 
     #[test]

@@ -77,6 +77,11 @@ cargo build
 
 # Redirects, with the trail shown
 ./target/debug/httphub send req.http -L --max-redirects 5
+
+# Collection runs -- the CI story, same binary
+./target/debug/httphub run examples/demo/users -e local
+./target/debug/httphub run . -e ci --reporter junit > results.xml
+./target/debug/httphub run . --bail
 ```
 
 `examples/demo/users/list.http`:
@@ -93,6 +98,55 @@ Environments live in `httphub.toml`, found by walking up from the request file:
 ```toml
 [env.local]
 base_url = "http://127.0.0.1:8787"
+```
+
+### Assertions live in the request file
+
+Postman's tests sit in a GUI textarea as sandboxed JavaScript, so they cannot
+be reviewed, diffed, or run without the GUI's runtime. Here they are lines in
+the same file, and `httphub run` checks them:
+
+```http
+### Create a user
+# @name create_user
+# @expect status 201
+# @expect header content-type contains application/json
+# @expect json /name == ada
+# @expect duration < 500
+# @capture id = json /id
+POST {{base_url}}/users
+Content-Type: application/json
+
+{"name": "ada"}
+```
+
+`@capture` feeds later requests in the same run, so a login-then-use chain
+needs no scripting:
+
+```http
+### Log in
+# @capture token = json /access_token
+POST {{base_url}}/login
+
+### Use it
+GET {{base_url}}/me
+Authorization: Bearer {{token}}
+```
+
+Assertions are deliberately declarative -- `status`, `header`, `body`, `json`
+(JSON Pointer, also accepting `a.b` and `$.a.b`) and `duration`. Anything that
+needs real logic belongs in the scripting layer, not in a half-language grown
+out of comments.
+
+```
+examples/demo/users/list.http
+  ok    list_users                 200     5.0ms  4 checks
+          captured first_url=/get?page=1
+  FAIL  create_user                500      17ms  2/3 checks failed
+          status 201 -- got 500
+          json /name == ada -- no value at /name
+
+2 requests, 1 passed, 1 failed  |  7 checks, 2 failed  in 28ms
 ```
 
 ### Exit codes
@@ -117,8 +171,9 @@ HTTP/1.1 and HTTP/2 with TLS 1.2/1.3, ALPN negotiation and per-request protocol
 pinning, measured per-phase timings and byte counts via an instrumented
 socket, full TLS control (`--insecure`, extra CAs, client certificates for
 mutual TLS, SNI override), redirect following with a per-hop trail, bodies
-streamed to disk, `send` and `parse` subcommands, structured and human output.
-27 unit tests.
+streamed to disk, collection runs with in-file assertions and value capture
+for chaining, `send`, `run` and `parse` subcommands, human / JSON / JUnit
+output. 46 unit tests.
 
 ### Decisions already made, deliberately
 
@@ -142,6 +197,13 @@ streamed to disk, `send` and `parse` subcommands, structured and human output.
 - **`Authorization` and `Cookie` are dropped when the origin changes.** A
   client that forwards credentials across hosts is one bad redirect away from
   handing a token to someone else's server.
+- **A request that cannot be sent is recorded, and the run continues.** A
+  report covering every request beats stopping at the first network blip;
+  `--bail` opts into the other behaviour.
+- **A failed `@capture` is a failed check, not an empty variable.** Otherwise
+  the next request fails for a reason that looks unrelated.
+- **Human output goes to stderr, machine output to stdout.** `--reporter json`
+  pipes cleanly; so does a body.
 - **Each hop times itself.** A waterfall should describe one exchange, not
   smear a chain together; one timeout still covers the whole chain.
 
@@ -149,16 +211,14 @@ streamed to disk, `send` and `parse` subcommands, structured and human output.
 
 Roughly in the order that keeps the tool honest:
 
-1. **`httphub run <dir>`** -- collection runs, assertions, JUnit output. This
-   is the CI story and it should never need a second binary.
-2. **Importers**: curl, Postman, Insomnia, OpenAPI, HAR. The migration path is
+1. **Importers**: curl, Postman, Insomnia, OpenAPI, HAR. The migration path is
    the onboarding path, so import must be lossless enough to actually leave.
-3. **Secrets resolver**: `{{secret:name}}` against the OS keychain, `.env`, and
+2. **Secrets resolver**: `{{secret:name}}` against the OS keychain, `.env`, and
    shell-outs to `op` / `vault` / `aws`. Never written into a workspace file.
-4. **Scripting**: embedded JS with a typed SDK, plus a JSON-over-stdio
+3. **Scripting**: embedded JS with a typed SDK, plus a JSON-over-stdio
    subprocess hook so a pre-request step can be any executable in any language.
-5. **Tauri GUI** over the same core, consuming the same event stream.
-6. **Capture proxy** -- `httphub proxy --capture` turning real traffic into
+4. **Tauri GUI** over the same core, consuming the same event stream.
+5. **Capture proxy** -- `httphub proxy --capture` turning real traffic into
    requests. The highest-value feature on this list and the one nobody does
    well.
 

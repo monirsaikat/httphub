@@ -1,13 +1,23 @@
 ### List users
 # @name list_users
+# @expect status 200
+# @expect header content-type contains application/json
+# @expect json /method == GET
+# @expect duration < 2000
+# @capture first_url = json /url
 GET {{base_url}}/get?page=1
 Accept: application/json
 
 ### Create a user
 # @name create_user
+# @expect status 201
+# @expect json /method == POST
+# @expect json /body contains ada
+# @capture served_by = header x-served-by
 POST {{base_url}}/post
 Content-Type: application/json
 Accept: application/json
+X-Previous-Url: {{first_url}}
 
 {
   "name": "ada",

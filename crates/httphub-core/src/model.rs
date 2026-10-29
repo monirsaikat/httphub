@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::event::Timings;
+use crate::expect::{Capture, Expectation};
 use crate::tls::TlsOptions;
 
 /// A single request as written in a `.http` file, before variable resolution.
@@ -17,6 +18,10 @@ pub struct RequestSpec {
     /// on-the-wire order is something we promise not to silently rewrite.
     pub headers: Vec<(String, String)>,
     pub body: Option<String>,
+    /// Assertions from `# @expect` lines, in the order written.
+    pub expectations: Vec<Expectation>,
+    /// Values to lift out of the response for later requests in a run.
+    pub captures: Vec<Capture>,
     /// 1-indexed line of the request line in the source file, for diagnostics.
     pub line: usize,
 }
