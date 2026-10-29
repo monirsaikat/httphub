@@ -1,0 +1,19 @@
+[package]
+name = "httphub-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local-first HTTP engine and file format for httphub"
+
+[dependencies]
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+http.workspace = true
+bytes.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+thiserror.workspace = true
+serde.workspace = true

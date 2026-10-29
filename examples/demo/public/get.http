@@ -1,0 +1,4 @@
+### Public get
+# @name public_get
+GET {{base_url}}/get
+Accept: application/json

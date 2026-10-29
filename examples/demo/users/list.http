@@ -1,0 +1,15 @@
+### List users
+# @name list_users
+GET {{base_url}}/get?page=1
+Accept: application/json
+
+### Create a user
+# @name create_user
+POST {{base_url}}/post
+Content-Type: application/json
+Accept: application/json
+
+{
+  "name": "ada",
+  "role": "admin"
+}

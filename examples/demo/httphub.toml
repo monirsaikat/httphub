@@ -1,0 +1,11 @@
+# Workspace manifest. Checked in, readable, diffable.
+# Secrets never live here -- they are referenced, not stored.
+
+[workspace]
+name = "demo"
+
+[env.local]
+base_url = "http://127.0.0.1:8787"
+
+[env.public]
+base_url = "https://httpbingo.org"
