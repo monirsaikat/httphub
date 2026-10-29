@@ -57,6 +57,12 @@ enum Command {
         http: Option<CliVersion>,
         #[arg(long, default_value_t = 30)]
         timeout: u64,
+        /// Follow redirects. Off by default: seeing the 301 is often the point.
+        #[arg(short = 'L', long = "location")]
+        follow: bool,
+        /// Give up after this many hops.
+        #[arg(long, default_value_t = 10, value_name = "N")]
+        max_redirects: usize,
         /// Accept any server certificate. Waives trust, not signature checks.
         #[arg(long)]
         insecure: bool,
@@ -163,6 +169,8 @@ async fn run(cli: Cli) -> Result<ExitCode, Error> {
             vars,
             http,
             timeout,
+            follow,
+            max_redirects,
             insecure,
             ca,
             cert,
@@ -190,7 +198,8 @@ async fn run(cli: Cli) -> Result<ExitCode, Error> {
             let opts = SendOptions {
                 timeout: Duration::from_secs(timeout),
                 force_version: http.map(Into::into),
-                follow_redirects: false,
+                follow_redirects: follow,
+                max_redirects,
                 store_dir: store_dir(&file),
                 tls,
             };
@@ -352,6 +361,20 @@ fn print_spec(spec: &RequestSpec) {
 }
 
 fn print_response(response: &ResponseHandle) -> Result<(), Error> {
+    for (i, hop) in response.redirects.iter().enumerate() {
+        eprintln!(
+            "   {}. {} {}  ->  {}  ({})",
+            i + 1,
+            hop.status,
+            hop.url,
+            hop.location,
+            format_duration(hop.timings.total.unwrap_or_default())
+        );
+    }
+    if !response.redirects.is_empty() {
+        eprintln!("   -> {}", response.url);
+    }
+
     eprintln!(
         "{} {} {}  {}  in {}",
         arrow(),
@@ -486,6 +509,13 @@ fn response_to_json(spec: &RequestSpec, response: &ResponseHandle) -> String {
 
     serde_json::json!({
         "request": { "name": spec.name, "method": spec.method, "url": spec.url },
+        "url": response.url,
+        "redirects": response.redirects.iter().map(|h| serde_json::json!({
+            "url": h.url,
+            "status": h.status,
+            "location": h.location,
+            "total_ms": h.timings.total.map(|d| d.as_secs_f64() * 1000.0),
+        })).collect::<Vec<_>>(),
         "status": response.status,
         "status_text": response.status_text,
         "version": response.version,
@@ -548,6 +578,13 @@ fn describe(event: &RequestEvent) -> String {
             format_bytes(*bytes as u64),
             format_bytes(*total)
         ),
+        RequestEvent::Redirect {
+            hop,
+            status,
+            to,
+            at,
+            ..
+        } => format!("redirect {hop}: {status} -> {to} at {}", format_duration(*at)),
         RequestEvent::Complete { at, body_len } => format!(
             "complete, {} in {}",
             format_bytes(*body_len),

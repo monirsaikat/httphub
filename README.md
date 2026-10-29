@@ -74,6 +74,9 @@ cargo build
 ./target/debug/httphub send req.http --ca internal-root.pem
 ./target/debug/httphub send req.http --cert client.pem --key client.key
 ./target/debug/httphub send req.http --sni internal.example
+
+# Redirects, with the trail shown
+./target/debug/httphub send req.http -L --max-redirects 5
 ```
 
 `examples/demo/users/list.http`:
@@ -113,8 +116,9 @@ resolution with `--var` and `httphub.toml` environments, the send engine over
 HTTP/1.1 and HTTP/2 with TLS 1.2/1.3, ALPN negotiation and per-request protocol
 pinning, measured per-phase timings and byte counts via an instrumented
 socket, full TLS control (`--insecure`, extra CAs, client certificates for
-mutual TLS, SNI override), bodies streamed to disk, `send` and `parse`
-subcommands, structured and human output. 18 unit tests.
+mutual TLS, SNI override), redirect following with a per-hop trail, bodies
+streamed to disk, `send` and `parse` subcommands, structured and human output.
+27 unit tests.
 
 ### Decisions already made, deliberately
 
@@ -130,22 +134,31 @@ subcommands, structured and human output. 18 unit tests.
   a staging box.
 - **A missing CA or key file exits 3, not 2.** Nothing was sent, so it is a
   configuration error, not a transport one.
+- **Redirects are not followed unless asked (`-L`).** Seeing the 301 is often
+  the reason you sent the request.
+- **303 always demotes to GET, and 301/302 do for non-GET/HEAD.** Browsers and
+  curl all do this; matching them surprises people less than being right in
+  isolation.
+- **`Authorization` and `Cookie` are dropped when the origin changes.** A
+  client that forwards credentials across hosts is one bad redirect away from
+  handing a token to someone else's server.
+- **Each hop times itself.** A waterfall should describe one exchange, not
+  smear a chain together; one timeout still covers the whole chain.
 
 ## Next
 
 Roughly in the order that keeps the tool honest:
 
-1. **Redirect following** with a per-hop event trail, off by default.
-2. **`httphub run <dir>`** -- collection runs, assertions, JUnit output. This
+1. **`httphub run <dir>`** -- collection runs, assertions, JUnit output. This
    is the CI story and it should never need a second binary.
-3. **Importers**: curl, Postman, Insomnia, OpenAPI, HAR. The migration path is
+2. **Importers**: curl, Postman, Insomnia, OpenAPI, HAR. The migration path is
    the onboarding path, so import must be lossless enough to actually leave.
-4. **Secrets resolver**: `{{secret:name}}` against the OS keychain, `.env`, and
+3. **Secrets resolver**: `{{secret:name}}` against the OS keychain, `.env`, and
    shell-outs to `op` / `vault` / `aws`. Never written into a workspace file.
-5. **Scripting**: embedded JS with a typed SDK, plus a JSON-over-stdio
+4. **Scripting**: embedded JS with a typed SDK, plus a JSON-over-stdio
    subprocess hook so a pre-request step can be any executable in any language.
-6. **Tauri GUI** over the same core, consuming the same event stream.
-7. **Capture proxy** -- `httphub proxy --capture` turning real traffic into
+5. **Tauri GUI** over the same core, consuming the same event stream.
+6. **Capture proxy** -- `httphub proxy --capture` turning real traffic into
    requests. The highest-value feature on this list and the one nobody does
    well.
 

@@ -23,8 +23,9 @@ use tokio::net::TcpStream;
 use crate::error::{Error, Result};
 use crate::event::{EventSink, RequestEvent, Timings};
 use crate::model::{
-    ByteCounts, HttpVersion, RequestSpec, ResponseHandle, SendOptions, TlsInfo,
+    ByteCounts, HttpVersion, RedirectHop, RequestSpec, ResponseHandle, SendOptions, TlsInfo,
 };
+use crate::redirect;
 use crate::tls::TlsOptions;
 use crate::transport::{Meter, Metered};
 
@@ -36,8 +37,7 @@ pub async fn send(
     events: Option<&EventSink>,
 ) -> Result<ResponseHandle> {
     let start = Instant::now();
-    let outcome = match tokio::time::timeout(opts.timeout, exchange(spec, opts, events, start)).await
-    {
+    let outcome = match tokio::time::timeout(opts.timeout, follow(spec, opts, events, start)).await {
         Ok(result) => result,
         Err(_) => Err(Error::Timeout(opts.timeout)),
     };
@@ -52,6 +52,60 @@ pub async fn send(
         );
     }
     outcome
+}
+
+/// The redirect loop. One timeout covers every hop together, the way curl's
+/// --max-time does: a chain of three fast hops should not get three times the
+/// budget of one slow request.
+async fn follow(
+    spec: &RequestSpec,
+    opts: &SendOptions,
+    events: Option<&EventSink>,
+    start: Instant,
+) -> Result<ResponseHandle> {
+    let mut current = spec.clone();
+    let mut hops: Vec<RedirectHop> = Vec::new();
+
+    loop {
+        // Each hop times itself, so a waterfall describes one exchange rather
+        // than smearing the whole chain together.
+        let mut handle = exchange(&current, opts, events, Instant::now()).await?;
+        handle.url = current.url.clone();
+
+        if !opts.follow_redirects || !redirect::is_redirect(handle.status) {
+            handle.redirects = hops;
+            return Ok(handle);
+        }
+
+        // A 3xx without a Location is the server's final answer, not a hop.
+        let Some(location) = handle.header("location").map(str::to_string) else {
+            handle.redirects = hops;
+            return Ok(handle);
+        };
+
+        if hops.len() >= opts.max_redirects {
+            return Err(Error::TooManyRedirects(opts.max_redirects));
+        }
+
+        let target = redirect::resolve(&current.url, &location)?;
+        emit(
+            events,
+            RequestEvent::Redirect {
+                hop: hops.len() + 1,
+                status: handle.status,
+                from: current.url.clone(),
+                to: target.clone(),
+                at: start.elapsed(),
+            },
+        );
+        hops.push(RedirectHop {
+            url: current.url.clone(),
+            status: handle.status,
+            location,
+            timings: handle.timings,
+        });
+        current = redirect::rewrite(&current, handle.status, &target);
+    }
 }
 
 async fn exchange(
@@ -240,6 +294,9 @@ async fn exchange(
     );
 
     Ok(ResponseHandle {
+        // `follow` overwrites these two once it knows the whole chain.
+        url: spec.url.clone(),
+        redirects: Vec::new(),
         status: status.as_u16(),
         status_text: status.canonical_reason().unwrap_or("").to_string(),
         version,

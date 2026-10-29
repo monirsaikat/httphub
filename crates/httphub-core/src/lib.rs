@@ -13,6 +13,7 @@ pub mod error;
 pub mod event;
 pub mod format;
 pub mod model;
+pub mod redirect;
 pub mod tls;
 pub mod transport;
 pub mod vars;

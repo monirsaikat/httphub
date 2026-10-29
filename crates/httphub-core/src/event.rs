@@ -16,6 +16,13 @@ pub enum RequestEvent {
     RequestSent { bytes: usize, at: Duration },
     FirstByte { status: u16, at: Duration },
     BodyChunk { bytes: usize, total: u64 },
+    Redirect {
+        hop: usize,
+        status: u16,
+        from: String,
+        to: String,
+        at: Duration,
+    },
     Complete { at: Duration, body_len: u64 },
     Failed { message: String, at: Duration },
 }

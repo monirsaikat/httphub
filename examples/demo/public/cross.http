@@ -1,0 +1,4 @@
+### cross
+# @name cross
+GET {{base_url}}/cross
+Authorization: Bearer secret-token

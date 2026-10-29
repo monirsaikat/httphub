@@ -1,0 +1,7 @@
+### see other
+# @name see
+POST {{base_url}}/see
+Content-Type: application/json
+Authorization: Bearer secret-token
+
+{"a":1}

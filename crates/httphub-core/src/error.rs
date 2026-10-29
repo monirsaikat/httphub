@@ -27,6 +27,9 @@ pub enum Error {
     #[error("request timed out after {0:?}")]
     Timeout(std::time::Duration),
 
+    #[error("stopped after {0} redirects; raise --max-redirects if that is intended")]
+    TooManyRedirects(usize),
+
     #[error("transport: {0}")]
     Transport(String),
 

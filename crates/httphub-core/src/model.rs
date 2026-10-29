@@ -49,6 +49,8 @@ pub struct SendOptions {
     /// Force a protocol instead of taking whatever ALPN negotiates.
     pub force_version: Option<HttpVersion>,
     pub follow_redirects: bool,
+    /// Only consulted when `follow_redirects` is set.
+    pub max_redirects: usize,
     /// Where response bodies are streamed. Derived, disposable state.
     pub store_dir: PathBuf,
     pub tls: TlsOptions,
@@ -60,16 +62,29 @@ impl Default for SendOptions {
             timeout: Duration::from_secs(30),
             force_version: None,
             follow_redirects: false,
+            max_redirects: 10,
             store_dir: PathBuf::from(".httphub/responses"),
             tls: TlsOptions::default(),
         }
     }
 }
 
+/// One hop that was followed on the way to the final response.
+#[derive(Debug, Clone)]
+pub struct RedirectHop {
+    pub url: String,
+    pub status: u16,
+    pub location: String,
+    pub timings: Timings,
+}
+
 /// What a send returns: metadata plus a *path*. The body itself is on disk so
 /// that a 2 GB response costs us a file handle instead of a heap allocation.
 #[derive(Debug, Clone)]
 pub struct ResponseHandle {
+    /// The url that produced this response, which differs from the request's
+    /// when redirects were followed.
+    pub url: String,
     pub status: u16,
     pub status_text: String,
     pub version: String,
@@ -78,6 +93,8 @@ pub struct ResponseHandle {
     pub body_len: u64,
     pub timings: Timings,
     pub bytes: ByteCounts,
+    /// Hops followed to get here, in order. Empty unless following was on.
+    pub redirects: Vec<RedirectHop>,
     pub remote_addr: Option<std::net::SocketAddr>,
     pub tls: Option<TlsInfo>,
 }
